@@ -19,11 +19,11 @@ jobs:
 
       - name: Set up Environment Variables
         run: |
-          echo "AKIAYDWHTC46I6RMJLXR=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "KARGI5M9ZEjUzAOs/08qCZFjC/7YhxWe2iRySWMa=${{ secrets.KARGI5M9ZEjUzAOs/08qCZFjC/7YhxWe2iRySWMa }}" >> $GITHUB_ENV
+          echo "AWS_ACCESS_KEY_ID=AKIAYDWHTC46I6RMJLXR{{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=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{{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
           echo "us-east-1=${{ secrets.AWS_REGION}}" >> $GITHUB_ENV
           echo "EB_APPLICATION_NAME=BITA-Stage" >> $GITHUB_ENV # Replace with your EB application name
-          echo "EB_ENVIRONMENT_NAME=BITA-Stage-env-env" >> $GITHUB_ENV     # Replace with your EB environment name
+          echo "EB_ENVIRONMENT_NAME=BITA-Stage-env" >> $GITHUB_ENV     # Replace with your EB environment name
           echo "DEPLOYMENT_PACKAGE=wordpress.zip" >> $GITHUB_ENV # Define the deployment package name
 
       - name: Install dependencies
