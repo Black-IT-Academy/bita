@@ -1,59 +1,137 @@
-name: Deploy WordPress to Elastic Beanstalk
+name: bitapipeline
+
+# Enable Buildkit and let compose use it to speed up image building
+env:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
 
 on:
+  # Allows for devs to press a button to deploy
+  workflow_dispatch:
+  pull_request:
+    branches: [ "master", "main" ]
+    paths-ignore: [ "docs/**" ]
+
   push:
-    branches:
-      - main # Or your main branch (e.g., main, production)
-  workflow_dispatch: # Allows manual triggering of the workflow
+    branches: [ "master", "main" ]
+    paths-ignore: [ "docs/**" ]
+
 
 jobs:
-  deploy:
-    name: Deploy
-    runs-on: ubuntu-latest # Use a Ubuntu runner for the GitHub Actions environment
+
+#--------------------------------------------------------------------------------------
+# Change the below portion to your own needs. This section is the Django/Python
+# configuration of running a linter and testing framework. Adjust this section to how
+# you've been running tests. Changes end at the next, huge dashed line
+
+  linter:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout Code Repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+
+      # Run all pre-commit hooks on all the files.
+      # Getting only staged files can be tricky in case a new PR is opened
+      # since the action is run on a branch in detached head state
+      - name: Install and Run Pre-commit
+        uses: pre-commit/action@v2.0.0
+
+  # With no caching at all the entire ci process takes 4m 30s to complete!
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:5.0
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:12
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_PASSWORD: postgres
+
+    env:
+      CELERY_BROKER_URL: "redis://localhost:6379/0"
+      # postgres://user:password@host:port/database
+      DATABASE_URL: "postgres://postgres:postgres@localhost:5432/postgres"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4 # Checks out the repository code so the workflow can access it
-        # with:
-        #   fetch-depth: 1 # Optional: Shallow clone for faster checkouts
 
-      - name: Set up Environment Variables
+      - name: Checkout Code Repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+
+      - name: Get pip cache dir
+        id: pip-cache-location
         run: |
-          echo "AWS_ACCESS_KEY_ID=AKIAYDWHTC46I6RMJLXR{{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=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{{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          echo "us-east-1=${{ secrets.AWS_REGION}}" >> $GITHUB_ENV
-          echo "EB_APPLICATION_NAME=BITA-Stage" >> $GITHUB_ENV # Replace with your EB application name
-          echo "EB_ENVIRONMENT_NAME=BITA-Stage-env" >> $GITHUB_ENV     # Replace with your EB environment name
-          echo "DEPLOYMENT_PACKAGE=wordpress.zip" >> $GITHUB_ENV # Define the deployment package name
+          echo "::set-output name=dir::$(pip cache dir)"
 
-      - name: Install dependencies
+      - name: Cache pip Project Dependencies
+        uses: actions/cache@v2
+        with:
+          # Get the location of pip cache dir
+          path: ${{ steps.pip-cache-location.outputs.dir }}
+          # Look to see if there is a cache hit for the corresponding requirements file
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/local.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Dependencies
         run: |
-          # Update package lists
-          sudo apt-get update
-          # Install zip (required for creating the deployment package) and the AWS CLI.
-          sudo apt-get install -y zip awscli
+          python -m pip install --upgrade pip
+          pip install -r requirements/local.txt
 
-      - name: Create Deployment Package
+      - name: Test with pytest
+        run: pytest
+
+# Changes should end here
+#--------------------------------------------------------------------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        if: |
+          github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.head_ref == 'refs/heads/master')
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }} # if you have/need it
+          aws-region: ${{ secrets.AWS_CODEDEPLOY_REGION }}
+# AWS CLI Docs: https://docs.aws.amazon.com/codedeploy/latest/userguide/deployments-create-cli.html
+      - name: Deploy to CodeDeploy
+        # success() checks if the previous job was canceled or not
+        if: ${{ success() }}
+        env:
+          DEPLOYMENT_GROUP: ${{ secrets.AWS_CODEDEPLOY_DEPLOYMENT_GROUP }}
+          DEPLOY_APP_NAME: ${{ secrets.AWS_CODEDEPLOY_APPLICATION_NAME }}
         run: |
-          #  Create a zip archive of the WordPress files, excluding node_modules and .git.
-          zip -r $DEPLOYMENT_PACKAGE . -x "node_modules/*" ".git/*"
+          aws deploy create-deployment \
+          --deployment-group-name "$DEPLOYMENT_GROUP" \
+          --description="$GITHUB_SHA" \
+          --application-name "$DEPLOY_APP_NAME" \
+          --github-location repository="$GITHUB_REPOSITORY",commitId="$GITHUB_SHA"
 
-      - name: Deploy to Elastic Beanstalk
-        run: |
-          # Use AWS CLI to deploy the zip file to Elastic Beanstalk.
-          # This command assumes that your EB environment is already set up and running.
-          aws elasticbeanstalk deploy \
-            --application-name "$EB_APPLICATION_NAME" \
-            --environment-name "$EB_ENVIRONMENT_NAME" \
-            --version-label "$(date +%Y%m%d%H%M%S)" \
-            --source-bundle S3Bucket="elasticbeanstalk-us-east-1",S3Key="$DEPLOYMENT_PACKAGE" #example
-          # Note: The S3 bucket name in the source-bundle parameter is crucial.
-          #   It should be in the same region as your Elastic Beanstalk environment.
-          #   Elastic Beanstalk often uses a default bucket, but you might need to specify if you have a custom setup.
-          #   The S3Key is the name of the zip file.
+# You need to change this section for your single-execution per-deployment script
+# based on your needs
+#--------------------------------------------------------------------------------------
+      - name: Run single-execution per-deployment script
+        # success() checks whether the previous job was successful
+        if: ${{ success() }}
+        env:
+          CI_CD_DEPLOYMENT_AUTH_TOKEN: ${{ secrets.CI_CD_DEPLOYMENT_AUTH_TOKEN }}
+        # Migrate so we can eventually check the latest migration
+        run: python manage.py deployment
 
-      - name: Clean up files
-        run: |
-          # Remove the deployment package after it has been deployed.
-          rm $DEPLOYMENT_PACKAGE
-
+# Change ends here
+#--------------------------------------------------------------------------------------
